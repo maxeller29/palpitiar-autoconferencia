@@ -1,388 +1,265 @@
 /**
  * Palpitiar — Conferência Automática de Combinações
- * Replica a lógica do admin.html, acessando Supabase e API da Caixa diretamente.
- * Roda via GitHub Actions (sem browser, sem computador ligado).
+ * Espelha EXATAMENTE a lógica do lotoia-db.js (v2).
+ * Roda via GitHub Actions — sem browser, sem computador ligado.
  */
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
-// URL do proxy Netlify (resolve CORS da API da Caixa)
-const NETLIFY_PROXY = process.env.NETLIFY_PROXY || 'https://palpitiar.com.br/.netlify/functions/resultado';
+
+// ─── CONSTANTES (idênticas ao lotoia-db.js) ───────────────────────────────────
+
+const PREMIOS_FIXOS = {
+  'lotofacil': {
+    '11 acertos': 6.00, '12 acertos': 12.00, '13 acertos': 30.00,
+    '14 acertos': null, '15 acertos': null,
+  },
+  'mega-sena': { 'sena': null, 'quina': null, 'quadra': null },
+  'quina':     { 'quina': null, 'quadra': null, 'terno': null, 'duque': null },
+};
+
+const FAIXAS_PREMIADAS = {
+  'mega-sena': { 6:'sena', 5:'quina', 4:'quadra' },
+  'lotofacil': { 15:'15 acertos', 14:'14 acertos', 13:'13 acertos', 12:'12 acertos', 11:'11 acertos' },
+  'quina':     { 5:'quina', 4:'quadra', 3:'terno', 2:'duque' },
+};
 
 const LOTERIAS = [
-  {
-    id: 'mega-sena',
-    nome: 'Mega-Sena',
-    slug: 'megasena',
-    totalDezenas: 6,
-    faixas: [
-      { nome: 'sena',   acertos: 6, fixo: false },
-      { nome: 'quina',  acertos: 5, fixo: false },
-      { nome: 'quadra', acertos: 4, fixo: false },
-    ],
-  },
-  {
-    id: 'lotofacil',
-    nome: 'Lotofácil',
-    slug: 'lotofacil',
-    totalDezenas: 15,
-    faixas: [
-      { nome: '15 acertos', acertos: 15, fixo: false },
-      { nome: '14 acertos', acertos: 14, fixo: false },
-      { nome: '13 acertos', acertos: 13, fixo: 30 },
-      { nome: '12 acertos', acertos: 12, fixo: 12 },
-      { nome: '11 acertos', acertos: 11, fixo: 6 },
-    ],
-  },
-  {
-    id: 'quina',
-    nome: 'Quina',
-    slug: 'quina',
-    totalDezenas: 5,
-    faixas: [
-      { nome: 'quina',  acertos: 5, fixo: false },
-      { nome: 'quadra', acertos: 4, fixo: false },
-      { nome: 'terno',  acertos: 3, fixo: false },
-      { nome: 'duque',  acertos: 2, fixo: false },
-    ],
-  },
+  { id: 'mega-sena',  nome: 'Mega-Sena',  slug: 'megasena'  },
+  { id: 'lotofacil',  nome: 'Lotofácil',  slug: 'lotofacil' },
+  { id: 'quina',      nome: 'Quina',       slug: 'quina'     },
 ];
 
-// ─── SUPABASE HELPERS ─────────────────────────────────────────────────────────
+// ─── SUPABASE (idêntico ao lotoia-db.js) ─────────────────────────────────────
 
-async function supabase(method, path, body) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
-    method,
-    headers: {
+const sb = {
+  async req(method, table, body = null, params = '') {
+    const url = `${SUPABASE_URL}/rest/v1/${table}${params}`;
+    const h = {
       'apikey': SUPABASE_KEY,
       'Authorization': `Bearer ${SUPABASE_KEY}`,
       'Content-Type': 'application/json',
-      'Prefer': method === 'POST' ? 'return=representation' : 'return=minimal',
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+    };
+    if (method === 'POST' || method === 'PATCH') h['Prefer'] = 'return=representation';
+    const res = await fetch(url, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
+    if (!res.ok) throw new Error(`[${method} ${table}] ${await res.text()}`);
+    const t = await res.text();
+    return t ? JSON.parse(t) : null;
+  },
+  insert: (t, d)    => sb.req('POST',   t, d),
+  select: (t, p='') => sb.req('GET',    t, null, p),
+  update: (t, d, p) => sb.req('PATCH',  t, d, p),
+  delete: (t, p)    => sb.req('DELETE', t, null, p),
+};
 
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`Supabase ${method} ${path} → ${res.status}: ${txt}`);
+// ─── BUSCAR RESULTADO (idêntico ao lotoia-db.js — acesso direto à Caixa) ─────
+
+async function buscarResultado(loteria, concurso) {
+  const ep = { 'mega-sena': 'megasena', 'lotofacil': 'lotofacil', 'quina': 'quina' };
+  const r = await fetch(
+    `https://servicebus2.caixa.gov.br/portaldeloterias/api/${ep[loteria]}/${concurso}`,
+    { signal: AbortSignal.timeout(15000) }
+  );
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const d = await r.json();
+
+  // Normaliza igual ao lotoia-db.js
+  return {
+    concurso: d.numero,
+    data: d.dataApuracao,
+    dezenas: d.listaDezenas.map(x => parseInt(x, 10)).sort((a, b) => a - b),
+    rateio: (d.listaRateioPremio || []).map(p => ({
+      faixa: p.descricaoFaixa,
+      ganhadores: p.numeroDeGanhadores,
+      valor: p.valorPremio,
+    })),
+  };
+}
+
+// ─── CALCULAR FAIXA (idêntico ao lotoia-db.js) ───────────────────────────────
+
+function calcularFaixa(loteria, dezenasComb, dezenasSorteio) {
+  const set = new Set(dezenasSorteio);
+  const acertos = dezenasComb.filter(d => set.has(d)).length;
+  const faixas = FAIXAS_PREMIADAS[loteria] || {};
+  for (let a = acertos; a >= 0; a--) {
+    if (faixas[a]) return { acertos, faixa: faixas[a], premiado: true };
   }
-
-  const text = await res.text();
-  return text ? JSON.parse(text) : null;
+  return { acertos, faixa: null, premiado: false };
 }
 
-/** Busca combinações pendentes de uma loteria (máx. 1000 por chamada) */
-async function buscarPendentes(loterid) {
-  const data = await supabase(
-    'GET',
-    `combinacoes?loteria=eq.${loterid}&status=eq.pendente&select=id,concurso,dezenas&order=concurso.asc&limit=1000`
-  );
-  return data || [];
-}
+// ─── OBTER VALOR PRÊMIO (idêntico ao lotoia-db.js) ───────────────────────────
 
-/** Busca o menor concurso pendente ainda não conferido */
-async function menorConcursoPendente(loterid) {
-  const data = await supabase(
-    'GET',
-    `combinacoes?loteria=eq.${loterid}&status=eq.pendente&select=concurso&order=concurso.asc&limit=1`
-  );
-  return data && data.length > 0 ? data[0].concurso : null;
-}
-
-/** Conta pendentes de uma loteria */
-async function contarPendentes(loterid) {
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/combinacoes?loteria=eq.${loterid}&status=eq.pendente&select=id`,
-    {
-      headers: {
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Prefer': 'count=exact',
-        'Range': '0-0',
-      },
+function obterValorPremio(loteria, faixa, rateio) {
+  const fixo = PREMIOS_FIXOS[loteria]?.[faixa];
+  if (fixo !== null && fixo !== undefined) return fixo;
+  if (!rateio) return null;
+  for (const r of rateio) {
+    const norm = r.faixa.toLowerCase().trim();
+    if (norm === faixa.toLowerCase() && r.ganhadores > 0) return r.valor;
+    if (loteria === 'mega-sena') {
+      if ((norm.includes('6') || norm.includes('seis'))   && faixa === 'sena'   && r.ganhadores > 0) return r.valor;
+      if ((norm.includes('5') || norm.includes('cinco'))  && faixa === 'quina'  && r.ganhadores > 0) return r.valor;
+      if ((norm.includes('4') || norm.includes('quatro')) && faixa === 'quadra' && r.ganhadores > 0) return r.valor;
     }
-  );
-  const range = res.headers.get('content-range') || '0/0';
-  const total = parseInt(range.split('/')[1]) || 0;
-  return total;
-}
-
-/** Verifica se o concurso já foi conferido anteriormente */
-async function concursoJaConferido(loterid, concurso) {
-  const data = await supabase(
-    'GET',
-    `sorteios_conferidos?loteria=eq.${loterid}&concurso=eq.${concurso}&select=concurso&limit=1`
-  );
-  return data && data.length > 0;
-}
-
-/** Busca resultado do sorteio via proxy Netlify */
-async function buscarResultado(slug, concurso) {
-  const url = `${NETLIFY_PROXY}?loteria=${slug}&concurso=${concurso}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
-  if (!res.ok) throw new Error(`Proxy HTTP ${res.status}`);
-  return res.json();
-}
-
-/** Calcula acertos entre dezenas da combinação e as dezenas sorteadas */
-function calcularAcertos(dezenasCombinacao, dezenasSorteio) {
-  const set = new Set(dezenasSorteio.map(Number));
-  return dezenasCombinacao.filter(d => set.has(Number(d))).length;
-}
-
-/** Determina a faixa premiada conforme acertos */
-function determinarFaixa(acertos, loteria) {
-  for (const f of loteria.faixas) {
-    if (acertos === f.acertos) return f;
+    if (loteria === 'quina') {
+      if (norm.includes('5') && faixa === 'quina'  && r.ganhadores > 0) return r.valor;
+      if (norm.includes('4') && faixa === 'quadra' && r.ganhadores > 0) return r.valor;
+      if (norm.includes('3') && faixa === 'terno'  && r.ganhadores > 0) return r.valor;
+      if (norm.includes('2') && faixa === 'duque'  && r.ganhadores > 0) return r.valor;
+    }
   }
   return null;
 }
 
-/** Determina valor de prêmio a partir do resultado da Caixa */
-function extrairValorFaixa(resultadoCaixa, faixaNome, loteria) {
-  // A API da Caixa retorna premiacoes[] com descricao e valorPremio
-  if (!resultadoCaixa.premiacoes) return 0;
-  const entry = resultadoCaixa.premiacoes.find(p =>
-    p.descricao && p.descricao.toLowerCase().includes(faixaNome.toLowerCase())
+// ─── CONFERIR CONCURSO (idêntico ao lotoia-db.js) ────────────────────────────
+
+async function conferirConcurso(loteria, concurso) {
+  const resultado = await buscarResultado(loteria, concurso);
+  if (!resultado?.dezenas?.length) throw new Error(`Resultado do concurso ${concurso} indisponível.`);
+
+  // Registra sorteio se ainda não existir
+  const jaConferido = await sb.select('sorteios_conferidos',
+    `?loteria=eq.${loteria}&concurso=eq.${concurso}`
+  ).catch(() => []);
+  if (!jaConferido?.length) {
+    await sb.insert('sorteios_conferidos', [{
+      loteria,
+      concurso: resultado.concurso || concurso,
+      data_sorteio: resultado.data || '',
+      dezenas: resultado.dezenas,
+    }]).catch(() => {});
+  }
+
+  // Busca pendentes deste concurso
+  const pendentes = await sb.select('combinacoes',
+    `?loteria=eq.${loteria}&concurso=eq.${concurso}&status=eq.pendente`
   );
-  return entry ? (entry.valorPremio || 0) : 0;
-}
+  if (!pendentes?.length) {
+    return { concurso: resultado.concurso || concurso, dezenas: resultado.dezenas,
+             conferidas: 0, premiadas: 0, deletadas: 0, detalhes: [] };
+  }
 
-/** Marca combinações como premiadas ou deleta as sem prêmio */
-async function processarCombinacoes(combinacoes, dezenasSorteio, resultadoCaixa, loteria) {
-  let premiadas = 0;
-  let deletadas = 0;
+  let premiadas = 0, deletadas = 0;
+  const detalhes = [];
 
-  const idsPremiados = [];
-  const idsSemPremio = [];
-
-  for (const comb of combinacoes) {
-    const acertos = calcularAcertos(comb.dezenas, dezenasSorteio);
-    const faixa = determinarFaixa(acertos, loteria);
-
-    if (faixa) {
-      idsPremiados.push({ id: comb.id, faixa, acertos });
+  for (const comb of pendentes) {
+    const { acertos, faixa, premiado } = calcularFaixa(loteria, comb.dezenas, resultado.dezenas);
+    if (premiado) {
+      const valor = obterValorPremio(loteria, faixa, resultado.rateio);
+      await sb.update('combinacoes', {
+        status: 'premiada',
+        faixa_premiada: faixa,
+        acertos,
+        valor_premio: valor,
+        concurso_sorteado: resultado.concurso || concurso,
+        resultado_sorteio: resultado.dezenas,
+        conferido_em: new Date().toISOString(),
+      }, `?id=eq.${comb.id}`);
       premiadas++;
+      detalhes.push({ id: comb.id, faixa, acertos, valor });
     } else {
-      idsSemPremio.push(comb.id);
+      await sb.delete('combinacoes', `?id=eq.${comb.id}`);
       deletadas++;
     }
   }
 
-  // Deletar não-premiadas em lote
-  if (idsSemPremio.length > 0) {
-    const lotes = chunk(idsSemPremio, 100);
-    for (const lote of lotes) {
-      const ids = lote.join(',');
-      await supabase('DELETE', `combinacoes?id=in.(${ids})`);
+  // Atualiza totais no sorteio_conferido
+  await sb.update('sorteios_conferidos',
+    { total_combinacoes: pendentes.length, total_premiadas: premiadas, total_deletadas: deletadas },
+    `?loteria=eq.${loteria}&concurso=eq.${concurso}`
+  ).catch(() => {});
+
+  // Atualiza resumo por faixa
+  await atualizarResumoPorFaixa(detalhes, loteria);
+
+  return {
+    concurso: resultado.concurso || concurso,
+    dezenas: resultado.dezenas,
+    conferidas: pendentes.length,
+    premiadas,
+    deletadas,
+    detalhes,
+  };
+}
+
+// ─── ATUALIZAR RESUMO POR FAIXA (idêntico ao lotoia-db.js) ──────────────────
+
+async function atualizarResumoPorFaixa(detalhes, loteria) {
+  if (!detalhes?.length) return;
+  const porFaixa = {};
+  for (const d of detalhes) {
+    if (!porFaixa[d.faixa]) porFaixa[d.faixa] = { count: 0, valor: 0 };
+    porFaixa[d.faixa].count++;
+    porFaixa[d.faixa].valor += parseFloat(d.valor) || 0;
+  }
+  for (const [faixa, dados] of Object.entries(porFaixa)) {
+    try {
+      const atual = await sb.select('resumo_por_faixa',
+        `?loteria=eq.${loteria}&faixa=eq.${encodeURIComponent(faixa)}`
+      );
+      if (atual?.length) {
+        await sb.update('resumo_por_faixa', {
+          total_premiadas: (atual[0].total_premiadas || 0) + dados.count,
+          valor_total: parseFloat(atual[0].valor_total || 0) + dados.valor,
+          atualizado_em: new Date().toISOString(),
+        }, `?loteria=eq.${loteria}&faixa=eq.${encodeURIComponent(faixa)}`);
+      }
+    } catch (e) {
+      console.warn('Faixa update err:', e.message);
     }
   }
-
-  // Marcar premiadas
-  for (const { id, faixa, acertos } of idsPremiados) {
-    const valor = faixa.fixo !== false
-      ? faixa.fixo
-      : extrairValorFaixa(resultadoCaixa, faixa.nome, loteria);
-
-    await supabase('PATCH', `combinacoes?id=eq.${id}`, {
-      status: 'premiada',
-      faixa_premiada: faixa.nome,
-      acertos,
-      valor_premio: valor,
-      conferido_em: new Date().toISOString(),
-    });
-
-    // Atualizar resumo_por_faixa
-    await atualizarResumoPorFaixa(loteria.id, faixa.nome, valor);
-  }
-
-  return { premiadas, deletadas };
 }
 
-/** Upsert no resumo_por_faixa (incrementa totais) */
-async function atualizarResumoPorFaixa(loterid, faixaNome, valor) {
-  // Busca registro atual
-  const atual = await supabase(
-    'GET',
-    `resumo_por_faixa?loteria=eq.${loterid}&faixa=eq.${encodeURIComponent(faixaNome)}&select=id,total_premiadas,valor_total&limit=1`
-  );
-
-  if (atual && atual.length > 0) {
-    await supabase('PATCH', `resumo_por_faixa?id=eq.${atual[0].id}`, {
-      total_premiadas: (atual[0].total_premiadas || 0) + 1,
-      valor_total: (atual[0].valor_total || 0) + valor,
-    });
-  } else {
-    await supabase('POST', 'resumo_por_faixa', {
-      loteria: loterid,
-      faixa: faixaNome,
-      total_premiadas: 1,
-      valor_total: valor,
-    });
-  }
-}
-
-/** Registra sorteio conferido */
-async function registrarSorteioConferido(loterid, concurso, dataSorteio, dezenas, stats) {
-  await supabase('POST', 'sorteios_conferidos', {
-    loteria: loterid,
-    concurso,
-    data_sorteio: dataSorteio,
-    dezenas,
-    total_combinacoes: stats.total,
-    total_premiadas: stats.premiadas,
-    total_deletadas: stats.deletadas,
-  });
-}
-
-// ─── CONFERÊNCIA POR LOTERIA ───────────────────────────────────────────────────
+// ─── CONFERIR TODOS OS PENDENTES DE UMA LOTERIA ───────────────────────────────
 
 async function conferirLoteria(loteria) {
   log(`\n▶ Iniciando conferência: ${loteria.nome}`);
 
-  const pendentesInicial = await contarPendentes(loteria.id);
-  log(`  Pendentes iniciais: ${pendentesInicial}`);
+  // Busca todos os concursos distintos com pendentes
+  const pendentes = await sb.select('combinacoes',
+    `?loteria=eq.${loteria.id}&status=eq.pendente&select=concurso`
+  );
 
-  if (pendentesInicial === 0) {
+  if (!pendentes?.length) {
     log(`  ✓ Nenhuma combinação pendente. Pulando.`);
-    return { inicial: 0, final: 0, conferidas: 0, iteracoes: 0 };
+    return { inicial: 0, final: 0, conferidas: 0, iteracoes: 0, concursosPulados: [] };
   }
 
+  const concursos = [...new Set(pendentes.map(p => p.concurso))].sort((a, b) => a - b);
+  const inicial = pendentes.length;
+  log(`  Pendentes iniciais: ${inicial} em ${concursos.length} concurso(s): [${concursos.join(', ')}]`);
+
+  let totalConferidas = 0;
   let iteracoes = 0;
-  const LIMITE = 100;
-  const concursosPulados = new Set();
-  let semProgresso = 0;
-  let pendenteAnterior = pendentesInicial;
+  const concursosPulados = [];
 
-  while (iteracoes < LIMITE) {
+  for (const concurso of concursos) {
     iteracoes++;
+    log(`  → Concurso ${concurso}...`);
 
-    // Pega o menor concurso pendente
-    const concurso = await menorConcursoPendente(loteria.id);
-    if (!concurso) {
-      log(`  ✓ Sem mais pendentes.`);
-      break;
-    }
-
-    if (concursosPulados.has(concurso)) {
-      log(`  ⏭ Concurso ${concurso} já marcado como futuro. Encerrando.`);
-      break;
-    }
-
-    // Verifica se já foi conferido antes (idempotência)
-    const jaConferido = await concursoJaConferido(loteria.id, concurso);
-    if (jaConferido) {
-      // Combinações deste concurso ficaram pendentes por engano — conferir de novo
-      log(`  ↩ Concurso ${concurso} já estava em sorteios_conferidos, mas há pendentes. Reprocessando.`);
-    }
-
-    log(`  → Iteração ${iteracoes}: concurso ${concurso}...`);
-
-    // Busca resultado na API da Caixa
-    let resultado;
     try {
-      resultado = await buscarResultado(loteria.slug, concurso);
-    } catch (err) {
-      log(`  ⚠ Erro ao buscar resultado do concurso ${concurso}: ${err.message}`);
-
-      // Se não conseguiu buscar, pode ser concurso futuro
-      if (err.message.includes('404') || err.message.includes('500')) {
-        log(`  ⏭ Concurso ${concurso} ainda não ocorreu (ou erro da API). Marcando como futuro.`);
-        concursosPulados.add(concurso);
-        break;
-      }
-
-      // Erro de rede — tenta mais uma vez
-      await sleep(5000);
-      try {
-        resultado = await buscarResultado(loteria.slug, concurso);
-      } catch (err2) {
-        log(`  ✗ Segunda tentativa falhou: ${err2.message}. Abortando esta loteria.`);
-        break;
-      }
+      const r = await conferirConcurso(loteria.id, concurso);
+      log(`    ✓ Dezenas: [${r.dezenas.join(', ')}] | conferidas: ${r.conferidas} | premiadas: ${r.premiadas} | deletadas: ${r.deletadas}`);
+      totalConferidas += r.conferidas;
+    } catch (e) {
+      // Se der erro (concurso futuro, API indisponível, etc.) — pula
+      log(`    ⏭ Pulando concurso ${concurso}: ${e.message}`);
+      concursosPulados.push(concurso);
     }
 
-    // Verifica se o sorteio já ocorreu
-    if (!resultado || !resultado.dezenasSorteadasOrdemSorteio) {
-      log(`  ⏭ Concurso ${concurso}: sorteio ainda não realizado ou sem dezenas. Encerrando.`);
-      concursosPulados.add(concurso);
-      break;
-    }
-
-    const dezenasSorteio = resultado.dezenasSorteadasOrdemSorteio.map(Number);
-    const dataSorteio = resultado.dataApuracao || resultado.data || null;
-
-    log(`  ✓ Concurso ${concurso} (${dataSorteio}): dezenas [${dezenasSorteio.join(', ')}]`);
-
-    // Busca todas as combinações pendentes deste concurso
-    const combinacoes = await supabase(
-      'GET',
-      `combinacoes?loteria=eq.${loteria.id}&concurso=eq.${concurso}&status=eq.pendente&select=id,dezenas&limit=1000`
-    );
-
-    if (!combinacoes || combinacoes.length === 0) {
-      log(`  ✓ Sem combinações pendentes para o concurso ${concurso}.`);
-      // Não havia pendentes deste concurso; pode ter sido processado parcialmente
-      if (!jaConferido) {
-        await registrarSorteioConferido(loteria.id, concurso, dataSorteio, dezenasSorteio, {
-          total: 0, premiadas: 0, deletadas: 0,
-        });
-      }
-      continue;
-    }
-
-    log(`  → ${combinacoes.length} combinações para processar...`);
-
-    // Processa em lotes de 50 para não sobrecarregar o Supabase
-    let totalPremiadas = 0;
-    let totalDeletadas = 0;
-    const lotes = chunk(combinacoes, 50);
-
-    for (const lote of lotes) {
-      const stats = await processarCombinacoes(lote, dezenasSorteio, resultado, loteria);
-      totalPremiadas += stats.premiadas;
-      totalDeletadas += stats.deletadas;
-    }
-
-    log(`  ✓ Concurso ${concurso}: ${totalPremiadas} premiadas, ${totalDeletadas} sem prêmio.`);
-
-    // Registra sorteio conferido
-    if (!jaConferido) {
-      await registrarSorteioConferido(loteria.id, concurso, dataSorteio, dezenasSorteio, {
-        total: combinacoes.length,
-        premiadas: totalPremiadas,
-        deletadas: totalDeletadas,
-      });
-    }
-
-    // Verifica progresso
-    const pendenteAtual = await contarPendentes(loteria.id);
-    if (pendenteAtual >= pendenteAnterior) {
-      semProgresso++;
-      if (semProgresso >= 2) {
-        log(`  ⚠ Sem progresso após 2 iterações. Encerrando.`);
-        break;
-      }
-    } else {
-      semProgresso = 0;
-      pendenteAnterior = pendenteAtual;
-    }
-
-    await sleep(500); // pausa para não martelelar a API
+    await sleep(600); // pausa entre concursos (igual ao lotoia-db.js)
   }
 
-  const pendentesFinal = await contarPendentes(loteria.id);
-  const conferidas = Math.max(0, pendentesInicial - pendentesFinal);
+  // Recontagem final
+  const restantes = await sb.select('combinacoes',
+    `?loteria=eq.${loteria.id}&status=eq.pendente&select=id`
+  );
+  const final = restantes?.length || 0;
 
-  log(`\n  ${loteria.nome}: ${pendentesInicial} → ${pendentesFinal} pendentes (${conferidas} conferidas, ${iteracoes} iterações)`);
+  log(`\n  ${loteria.nome}: ${inicial} → ${final} pendentes | ${totalConferidas} conferidas | ${iteracoes} iterações`);
 
-  return {
-    inicial: pendentesInicial,
-    final: pendentesFinal,
-    conferidas,
-    iteracoes,
-    concursosPulados: [...concursosPulados],
-  };
+  return { inicial, final, conferidas: totalConferidas, iteracoes, concursosPulados };
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
@@ -424,14 +301,10 @@ async function main() {
     if (r.erro) {
       log(`${loteria.nome.padEnd(13)} | ERRO: ${r.erro}`);
     } else {
-      const nome = loteria.nome.padEnd(13);
-      const ini  = String(r.inicial).padStart(7);
-      const fin  = String(r.final).padStart(5);
-      const conf = String(r.conferidas).padStart(10);
-      const iter = String(r.iteracoes).padStart(5);
-      log(`${nome} | ${ini} | ${fin} | ${conf} | ${iter}`);
-      if (r.concursosPulados && r.concursosPulados.length > 0) {
-        log(`              ↳ Concursos futuros: [${r.concursosPulados.join(', ')}]`);
+      const linha = `${loteria.nome.padEnd(13)} | ${String(r.inicial).padStart(7)} | ${String(r.final).padStart(5)} | ${String(r.conferidas).padStart(10)} | ${String(r.iteracoes).padStart(5)}`;
+      log(linha);
+      if (r.concursosPulados?.length > 0) {
+        log(`              ↳ ⏭ Concursos futuros/indisponíveis: [${r.concursosPulados.join(', ')}]`);
       }
     }
   }
@@ -443,19 +316,8 @@ async function main() {
 
 // ─── UTILITÁRIOS ──────────────────────────────────────────────────────────────
 
-function chunk(arr, size) {
-  const chunks = [];
-  for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
-  return chunks;
-}
-
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-function log(msg) {
-  console.log(msg);
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function log(msg)  { console.log(msg); }
 
 main().catch(err => {
   console.error('ERRO FATAL:', err);
