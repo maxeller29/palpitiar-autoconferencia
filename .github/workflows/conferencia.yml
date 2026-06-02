@@ -1,0 +1,54 @@
+name: 🎱 Palpitiar — Conferência Automática
+
+on:
+  schedule:
+    # Roda uma vez por dia às 03:30 BRT = 06:30 UTC
+    # De terça a domingo (segunda excluída — sem sorteios no domingo à noite)
+    # Cron: minuto hora dia mês dia_semana (0=dom, 1=seg, ..., 6=sáb)
+    - cron: '30 6 * * 2,3,4,5,6,0'   # 03:30 BRT · ter, qua, qui, sex, sáb, dom
+
+  # Permite disparar manualmente pelo GitHub Actions (útil para testes)
+  workflow_dispatch:
+    inputs:
+      loteria:
+        description: 'Loteria específica (deixe vazio para todas)'
+        required: false
+        default: ''
+
+jobs:
+  conferir:
+    name: Conferir combinações pendentes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 📥 Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 📅 Informações do ambiente
+        run: |
+          echo "🕐 UTC: $(date -u)"
+          echo "🕐 BRT: $(TZ='America/Sao_Paulo' date)"
+          echo "📅 Dia da semana: $(TZ='America/Sao_Paulo' date '+%A')"
+
+      - name: 🎱 Executar conferência
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          NETLIFY_PROXY: ${{ secrets.NETLIFY_PROXY }}
+        run: node scripts/conferir.js
+
+      - name: 📊 Salvar log como artefato
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-conferencia-${{ github.run_id }}
+          path: |
+            **/*.log
+          retention-days: 30
+          if-no-files-found: ignore
