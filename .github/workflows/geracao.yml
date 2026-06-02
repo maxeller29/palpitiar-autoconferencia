@@ -1,0 +1,37 @@
+name: 🎲 Palpitiar — Geração Automática
+
+on:
+  schedule:
+    # Roda de segunda a sábado às 05:00 BRT = 08:00 UTC
+    # Cron: minuto hora dia mês dia_semana (0=dom, 1=seg, ..., 6=sáb)
+    - cron: '0 8 * * 1,2,3,4,5,6'   # 05:00 BRT · seg, ter, qua, qui, sex, sáb
+
+  # Permite disparar manualmente (útil para testes)
+  workflow_dispatch:
+
+jobs:
+  gerar:
+    name: Gerar combinações pendentes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 📥 Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 📅 Informações do ambiente
+        run: |
+          echo "🕐 UTC: $(date -u)"
+          echo "🕐 BRT: $(TZ='America/Sao_Paulo' date)"
+          echo "📅 Dia da semana: $(TZ='America/Sao_Paulo' date '+%A')"
+
+      - name: 🎲 Executar geração
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: node scripts/gerar.js
