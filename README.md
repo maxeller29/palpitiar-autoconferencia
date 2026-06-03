@@ -120,3 +120,4 @@ O uso está bem dentro do gratuito.
 
 **Workflow não aparece na aba Actions**
 → Confirme que o arquivo `.github/workflows/conferencia.yml` está na branch `main`.
+<!-- atualizado -->
