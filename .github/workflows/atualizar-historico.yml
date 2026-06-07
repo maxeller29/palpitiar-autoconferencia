@@ -1,0 +1,85 @@
+# .github/workflows/atualizar-historico.yml
+# Repositório: maxeller29/Palpitiar
+#
+# Atualiza os JSONs históricos (mega-sena, lotofácil, quina) buscando
+# apenas os concursos novos da API da Caixa e fazendo commit no repo.
+# O Netlify republica automaticamente após cada push.
+#
+# Agenda: 22h BRT (01h UTC) de terça a domingo
+
+name: Atualizar Historico de Loterias
+
+on:
+  schedule:
+    - cron: '0 1 * * 2,3,4,5,6,0'   # 01:00 UTC = 22:00 BRT | ter,qua,qui,sex,sab,dom
+  workflow_dispatch:
+    inputs:
+      forcar_commit:
+        description: 'Forcar commit mesmo sem mudancas'
+        required: false
+        default: 'false'
+
+jobs:
+  atualizar:
+    name: Buscar concursos novos
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Atualizar historicos
+        run: node scripts/atualizar-historico.js
+        # Script em scripts/, JSONs na raiz — o script usa process.cwd() para encontrá-los
+
+      - name: Verificar mudancas
+        id: check
+        run: |
+          if git diff --quiet -- mega-sena-historico.json lotofacil-historico.json quina-historico.json; then
+            echo "mudancas=false" >> $GITHUB_OUTPUT
+            echo "Nenhum JSON alterado."
+          else
+            echo "mudancas=true" >> $GITHUB_OUTPUT
+            git diff --stat -- mega-sena-historico.json lotofacil-historico.json quina-historico.json
+          fi
+
+      - name: Commit e push
+        if: steps.check.outputs.mudancas == 'true' || github.event.inputs.forcar_commit == 'true'
+        run: |
+          git config user.name  "palpitiar-bot"
+          git config user.email "bot@palpitiar.com.br"
+          git add mega-sena-historico.json lotofacil-historico.json quina-historico.json
+          git diff --cached --quiet && echo "Nada a commitar." && exit 0
+
+          MEGA=$(node -e "const d=JSON.parse(require('fs').readFileSync('mega-sena-historico.json'));console.log(d.meta.ultimoConcurso+'('+d.meta.totalConcursos+')')")
+          LOTO=$(node -e "const d=JSON.parse(require('fs').readFileSync('lotofacil-historico.json'));console.log(d.meta.ultimoConcurso+'('+d.meta.totalConcursos+')')")
+          QUIN=$(node -e "const d=JSON.parse(require('fs').readFileSync('quina-historico.json'));console.log(d.meta.ultimoConcurso+'('+d.meta.totalConcursos+')')")
+
+          git commit -m "chore: historico $(date -u '+%Y-%m-%d') | MS:$MEGA LF:$LOTO QN:$QUIN [skip ci]"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resumo
+        if: always()
+        run: |
+          echo "=== Estado atual dos JSONs ==="
+          node -e "
+            ['mega-sena','lotofacil','quina'].forEach(n => {
+              try {
+                const d = JSON.parse(require('fs').readFileSync(n+'-historico.json'));
+                console.log(n+': concurso '+d.meta.ultimoConcurso+' | '+d.meta.totalConcursos+' draws | '+d.meta.ultimaData);
+              } catch(e) {
+                console.log(n+': arquivo nao encontrado na raiz');
+              }
+            });
+          "
